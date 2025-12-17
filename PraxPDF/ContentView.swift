@@ -136,6 +136,7 @@ struct ContentView: View {
 
                 pdfPreviewModel.fileURL = entry.url
                 openWindow(id: "preview")
+                
             } else {
                 editPcardHolderName = ""
                 editDocumentNumber = ""

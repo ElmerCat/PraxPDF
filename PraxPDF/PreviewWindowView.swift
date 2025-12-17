@@ -43,13 +43,34 @@ struct PDFViewRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> PDFView {
         let pdfView = PDFView()
+        pdfView.displaysPageBreaks = true
+        pdfView.displayMode = .singlePageContinuous
         pdfView.autoScales = true
+        pdfView.backgroundColor = .clear
         return pdfView
     }
 
     func updateNSView(_ nsView: PDFView, context: Context) {
-        if nsView.document?.documentURL != url {
-            nsView.document = PDFDocument(url: url)
+        // Ensure security-scoped access while loading the document
+        let needsAccess = url.startAccessingSecurityScopedResource()
+        defer { if needsAccess { url.stopAccessingSecurityScopedResource() } }
+
+        // Reload if document is nil or the URL changed
+        let needsReload = (nsView.document == nil) || (nsView.document?.documentURL != url)
+        if needsReload {
+            if let doc = PDFDocument(url: url) {
+                nsView.document = doc
+                // Apply layout/scaling after setting document
+                nsView.layoutDocumentView()
+                nsView.autoScales = true
+                print("PDF loaded for \(url.lastPathComponent), pages=\(doc.pageCount)")
+            } else {
+                nsView.document = nil
+                print("Failed to load PDF at: \(url.path)")
+            }
+        } else {
+            // Force layout on same-document updates
+            nsView.layoutDocumentView()
         }
     }
 }

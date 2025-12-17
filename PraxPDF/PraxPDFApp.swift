@@ -25,14 +25,38 @@ struct PraxPDFApp: App {
         }
         .defaultPosition(.center)
         .defaultSize(width: 1100, height: 750)
-        .windowResizability(.contentSize)
+        .windowResizability(.automatic)
 
         // Preview window (secondary)
-        Window("Preview", id: "preview") {
-            PreviewWindowView(previewModel: pdfPreviewModel)
+        UtilityWindow("Preview", id: "preview") {
+            VStack(spacing: 0) {
+                WindowFrameAutosave(name: "PreviewWindowFrame")
+                    .frame(width: 0, height: 0)
+                ApplyAutosavedFrame(name: "PreviewWindowFrame")
+                    .frame(width: 0, height: 0)
+                PreviewWindowView(previewModel: pdfPreviewModel)
+            }
         }
         .defaultPosition(.center)
         .defaultSize(width: 800, height: 1000)
-        .windowResizability(.contentSize)
+        .windowResizability(.automatic)
     }
+}
+
+struct ApplyAutosavedFrame: NSViewRepresentable {
+    let name: String
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            // Ensure window is resizable so AppKit can apply the saved size
+            window.styleMask.insert(.resizable)
+            // Apply the autosaved frame if present
+            window.setFrameUsingName(name, force: true)
+        }
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
