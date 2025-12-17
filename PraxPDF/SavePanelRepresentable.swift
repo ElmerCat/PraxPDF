@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct SavePanelRepresentable: NSViewControllerRepresentable {
     typealias NSViewControllerType = NSViewController
@@ -24,7 +25,7 @@ struct SavePanelRepresentable: NSViewControllerRepresentable {
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.allowsOtherFileTypes = false
-        panel.allowedFileTypes = ["pdf"]
+        panel.allowedContentTypes = [.pdf]
         panel.level = .modalPanel
 
         // Pre-fill name and directory from suggestedURL

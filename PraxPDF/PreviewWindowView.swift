@@ -1,8 +1,14 @@
 import SwiftUI
 import PDFKit
+import Combine
 
-struct PDFPreviewView: View {
-    @EnvironmentObject var previewModel: PreviewModel
+struct PreviewWindowView: View {
+    @ObservedObject private var previewModel: PDFPreviewModel
+
+    init(previewModel: PDFPreviewModel? = nil) {
+        // If no model is injected, create a private one so we don't crash.
+        self._previewModel = ObservedObject(wrappedValue: previewModel ?? PDFPreviewModel())
+    }
 
     var body: some View {
         Group {
@@ -29,23 +35,32 @@ struct PDFPreviewView: View {
     }
 }
 
-struct PDFViewRepresentable: UIViewRepresentable {
+
+import AppKit
+
+struct PDFViewRepresentable: NSViewRepresentable {
     let url: URL
 
-    func makeUIView(context: Context) -> PDFView {
+    func makeNSView(context: Context) -> PDFView {
         let pdfView = PDFView()
         pdfView.autoScales = true
         return pdfView
     }
 
-    func updateUIView(_ uiView: PDFView, context: Context) {
-        if let document = PDFDocument(url: url) {
-            uiView.document = document
+    func updateNSView(_ nsView: PDFView, context: Context) {
+        if nsView.document?.documentURL != url {
+            nsView.document = PDFDocument(url: url)
         }
     }
 }
 
-class PreviewModel: ObservableObject {
+
+final class PDFPreviewModel: ObservableObject {
     @Published var fileURL: URL?
     @Published var isVisible: Bool = false
+}
+
+#Preview("Preview Window") {
+    let model = PDFPreviewModel()
+    return PreviewWindowView(previewModel: model)
 }
