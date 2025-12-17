@@ -1,3 +1,8 @@
+//
+//  PreviewWindowView
+//  PraxPDF - Prax=1217-0
+
+
 import SwiftUI
 import PDFKit
 import Combine

@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  PraxPDF
+//  PraxPDF - Prax=1217-0
 //
 //  Created by Elmer Cat on 12/15/25.
 //
@@ -9,6 +9,7 @@ import SwiftUI
 import PDFKit
 import UniformTypeIdentifiers
 import AppKit
+import CoreGraphics
 
 struct PDFEntry: Identifiable, Hashable {
     let id: UUID
@@ -58,6 +59,11 @@ struct ContentView: View {
     @State private var editDescription: String = ""
     @State private var saveError: String?
     @State private var showSavePanel: Bool = false
+    @State private var mergeAsShown: Bool = false
+
+    @State private var pageCount: Int? = nil
+    @State private var totalHeightPoints: CGFloat? = nil
+    @State private var maxWidthPoints: CGFloat? = nil
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -134,6 +140,9 @@ struct ContentView: View {
                 editCostObject = entry.costObject ?? ""
                 editDescription = entry.description ?? ""
 
+                // Compute PDF page metrics
+                computePageMetrics(for: entry.url)
+
                 pdfPreviewModel.fileURL = entry.url
                 openWindow(id: "preview")
                 
@@ -146,6 +155,10 @@ struct ContentView: View {
                 editGLAccount = ""
                 editCostObject = ""
                 editDescription = ""
+
+                pageCount = nil
+                totalHeightPoints = nil
+                maxWidthPoints = nil
 
                 pdfPreviewModel.fileURL = nil
                 dismissWindow(id: "preview")
@@ -172,6 +185,21 @@ struct ContentView: View {
                             LabeledContent("Description") { TextField("Description", text: $editDescription) }
                         }
 
+                        Group {
+                            if let pc = pageCount, let totalH = totalHeightPoints, let maxW = maxWidthPoints {
+                                let inchesW = maxW / 72.0
+                                let inchesH = totalH / 72.0
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("PDF Metrics").font(.headline)
+                                    Text("Pages: \(pc)")
+                                    Text(String(format: "Merged size: %.0f × %.0f pts (%.2f × %.2f in)", maxW, totalH, inchesW, inchesH))
+                                }
+                            } else {
+                                Text("PDF Metrics: —")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
                         HStack {
                             Button("Save") {
                                 handleSaveCurrentSelection()
@@ -180,6 +208,16 @@ struct ContentView: View {
 
                             Button("Save As…") {
                                 showSavePanel = true
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("Merge Pages") {
+                                handleMergePagesOverwrite()
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("Merge Pages As…") {
+                                mergeAsShown = true
                             }
                             .buttonStyle(.bordered)
                         }
@@ -207,6 +245,18 @@ struct ContentView: View {
                 SaveAsPanel(suggestedURL: entry.url) { destination in
                     do {
                         try saveEdits(from: entry.url, to: destination)
+                    } catch {
+                        saveError = error.localizedDescription
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $mergeAsShown) {
+            if let id = selection, let entry = selectedFiles.first(where: { $0.id == id }) {
+                SaveAsPanel(suggestedURL: entry.url.deletingPathExtension().appendingPathExtension("merged.pdf")) { destination in
+                    do {
+                        try mergeAllPagesVerticallyIntoSinglePage(sourceURL: entry.url, destinationURL: destination)
+                        // Update preview to show merged result if overwriting selected file
                     } catch {
                         saveError = error.localizedDescription
                     }
@@ -263,6 +313,119 @@ struct ContentView: View {
                 saveError = error.localizedDescription
             }
         }
+    }
+
+    private func computePageMetrics(for url: URL) {
+        let needsStop = url.startAccessingSecurityScopedResource()
+        defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
+        guard let doc = PDFDocument(url: url) else {
+            pageCount = nil
+            totalHeightPoints = nil
+            maxWidthPoints = nil
+            return
+        }
+        let count = doc.pageCount
+        var totalH: CGFloat = 0
+        var maxW: CGFloat = 0
+        for i in 0..<count {
+            guard let page = doc.page(at: i) else { continue }
+            let rect = page.bounds(for: .mediaBox)
+            totalH += rect.height
+            if rect.width > maxW { maxW = rect.width }
+        }
+        pageCount = count
+        totalHeightPoints = totalH
+        maxWidthPoints = maxW
+    }
+
+    private func handleMergePagesOverwrite() {
+        guard let id = selection, let entry = selectedFiles.first(where: { $0.id == id }) else { return }
+        do {
+            try mergeAllPagesVerticallyIntoSinglePage(sourceURL: entry.url, destinationURL: entry.url)
+            // Refresh preview if it's currently visible
+            if pdfPreviewModel.isVisible {
+                let current = pdfPreviewModel.fileURL
+                pdfPreviewModel.fileURL = nil
+                pdfPreviewModel.fileURL = current
+            }
+            // Recompute metrics based on the new single-page doc
+            computePageMetrics(for: entry.url)
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+
+    private func mergeAllPagesVerticallyIntoSinglePage(sourceURL: URL, destinationURL: URL) throws {
+        let needsStopSource = sourceURL.startAccessingSecurityScopedResource()
+        defer { if needsStopSource { sourceURL.stopAccessingSecurityScopedResource() } }
+        guard let sourceDoc = PDFDocument(url: sourceURL) else {
+            throw NSError(domain: "PraxPDF", code: 1001, userInfo: [NSLocalizedDescriptionKey: "Unable to open source PDF for merging."])
+        }
+
+        let count = sourceDoc.pageCount
+        if count == 0 {
+            // Write empty doc
+            let empty = PDFDocument()
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try? FileManager.default.removeItem(at: destinationURL)
+            }
+            empty.write(to: destinationURL)
+            return
+        }
+
+        // Calculate canvas size in points
+        var totalHeight: CGFloat = 0
+        var maxWidth: CGFloat = 0
+        var pageRects: [CGRect] = []
+        for i in 0..<count {
+            guard let page = sourceDoc.page(at: i) else { continue }
+            let rect = page.bounds(for: .mediaBox)
+            totalHeight += rect.height
+            maxWidth = max(maxWidth, rect.width)
+            pageRects.append(rect)
+        }
+
+        // Setup a PDF graphics context
+        var mediaBox = CGRect(x: 0, y: 0, width: maxWidth, height: totalHeight)
+        let fm = FileManager.default
+        // Write to a temp URL first to be safe
+        let tmp = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
+        guard let consumer = CGDataConsumer(url: tmp as CFURL) else {
+            throw NSError(domain: "PraxPDF", code: 1002, userInfo: [NSLocalizedDescriptionKey: "Failed to create data consumer."])
+        }
+        guard let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw NSError(domain: "PraxPDF", code: 1003, userInfo: [NSLocalizedDescriptionKey: "Failed to create PDF context."])
+        }
+
+        ctx.beginPDFPage([kCGPDFContextMediaBox as String: mediaBox] as CFDictionary)
+
+        // Draw pages top-to-bottom
+        var currentTop = totalHeight
+        for i in 0..<count {
+            guard let page = sourceDoc.page(at: i) else { continue }
+            let rect = pageRects[i]
+            let pageHeight = rect.height
+            let drawOriginY = currentTop - pageHeight
+
+            ctx.saveGState()
+            ctx.translateBy(x: 0, y: drawOriginY)
+            // Draw at native scale
+            page.draw(with: .mediaBox, to: ctx)
+            ctx.restoreGState()
+
+            currentTop -= pageHeight
+        }
+
+        ctx.endPDFPage()
+        ctx.closePDF()
+
+        // Move temp to destination
+        let needsStopDest = destinationURL.startAccessingSecurityScopedResource()
+        defer { if needsStopDest { destinationURL.stopAccessingSecurityScopedResource() } }
+        if fm.fileExists(atPath: destinationURL.path) {
+            try? fm.removeItem(at: destinationURL)
+        }
+        try fm.moveItem(at: tmp, to: destinationURL)
     }
 
     private func handleImportResult(_ result: Result<[URL], Error>) {
@@ -481,3 +644,4 @@ struct SaveAsPanel: View {
 #Preview("ContentView") {
     ContentView(pdfPreviewModel: PDFPreviewModel())
 }
+
