@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  PraxPDF - Prax=1219-6
+//  PraxPDF - Prax=1219-7
 //
 //  Created by Elmer Cat on 12/15/25.
 //
@@ -10,6 +10,8 @@ import PDFKit
 import UniformTypeIdentifiers
 import AppKit
 import CoreGraphics
+
+private let DEBUG_LOGS = false
 
 struct PDFEntry: Identifiable, Hashable {
     let id: UUID
@@ -67,12 +69,13 @@ struct ContentView: View {
     
     @State private var unknownFieldNames: [String] = []
     @State private var showUnknownFieldsAlert: Bool = false
-    
+
     @AppStorage("mergeTopMargin") private var mergeTopMargin: Double = 0
     @AppStorage("mergeBottomMargin") private var mergeBottomMargin: Double = 0
     @AppStorage("mergeInterPageGap") private var mergeInterPageGap: Double = 0
 
     @State private var isPreviewingMerge: Bool = false
+    @State private var lastPreviewURL: URL? = nil
     @StateObject private var perPageTrimModel = PerPageTrimModel()
 
     private var sidebar: some View {
@@ -154,7 +157,7 @@ struct ContentView: View {
                 computePageMetrics(for: entry.url)
 
                 pdfPreviewModel.fileURL = entry.url
-                openWindow(id: "preview")
+                PreviewWindowPresenter.shared.present(model: pdfPreviewModel)
                 
             } else {
                 editPcardHolderName = ""
@@ -174,7 +177,7 @@ struct ContentView: View {
                 showUnknownFieldsAlert = false
 
                 pdfPreviewModel.fileURL = nil
-                dismissWindow(id: "preview")
+                PreviewWindowPresenter.shared.close()
             }
         }
     }
@@ -400,8 +403,14 @@ struct ContentView: View {
                 interPageGap: CGFloat(mergeInterPageGap),
                 perPageTrims: perPageTrimModel.trims
             )
+            if let old = lastPreviewURL {
+                try? FileManager.default.removeItem(at: old)
+            }
             pdfPreviewModel.fileURL = tmp
-            if !pdfPreviewModel.isVisible { openWindow(id: "preview") }
+            lastPreviewURL = tmp
+            if !pdfPreviewModel.isVisible {
+                PreviewWindowPresenter.shared.present(model: pdfPreviewModel)
+            }
         } catch {
             saveError = error.localizedDescription
         }
@@ -449,10 +458,7 @@ struct ContentView: View {
         let count = doc.pageCount
         var totalH: CGFloat = 0
         var maxW: CGFloat = 0
-        let knownFields: Set<String> = [
-            "PcardHolderName", "DocumentNumber", "Date", "Amount",
-            "Vendor", "GLAccount", "CostObject", "Description"
-        ]
+        let knownFields = KnownFormFields.all
         var foundUnknowns = Set<String>()
         for i in 0..<count {
             guard let page = doc.page(at: i) else { continue }
@@ -521,10 +527,14 @@ struct ContentView: View {
                 interPageGap: CGFloat(mergeInterPageGap),
                 perPageTrims: perPageTrimModel.trims
             )
+            if let old = lastPreviewURL {
+                try? FileManager.default.removeItem(at: old)
+            }
             pdfPreviewModel.fileURL = tmp
+            lastPreviewURL = tmp
             isPreviewingMerge = true
             if !pdfPreviewModel.isVisible {
-                openWindow(id: "preview")
+                PreviewWindowPresenter.shared.present(model: pdfPreviewModel)
             }
         } catch {
             saveError = error.localizedDescription
@@ -551,27 +561,16 @@ struct ContentView: View {
         // Use mediaBox consistently (matches the Trim Tool and thumbnails)
         var pageRects: [CGRect] = []
         pageRects.reserveCapacity(pageCount)
-        var maxVisibleWidth: CGFloat = 0
-        var visibleHeights: [CGFloat] = Array(repeating: 0, count: pageCount)
 
         for i in 0..<pageCount {
             guard let page = sourceDoc.page(at: i) else { continue }
             let rect = page.bounds(for: .mediaBox)
             pageRects.append(rect)
-
-            let per = perPageTrims[i] ?? .zero
-            let seamTop: CGFloat = (i == 0) ? 0 : trimTop
-            let seamBottom: CGFloat = (i == pageCount - 1) ? 0 : trimBottom
-            let vw = max(0, rect.width  - (per.left + per.right))
-            let vh = max(0, rect.height - (per.top  + per.bottom) - (seamTop + seamBottom))
-            maxVisibleWidth = max(maxVisibleWidth, vw)
-            visibleHeights[i] = vh
         }
 
-        let internalSeams = max(0, pageCount - 1)
-        let gapsTotal = interPageGap * CGFloat(internalSeams)
-        let canvasWidth = maxVisibleWidth
-        let canvasHeight = visibleHeights.reduce(0, +) + gapsTotal
+        let canvas = PDFGeometry.canvasSize(for: pageRects, trims: perPageTrims, trimTop: trimTop, trimBottom: trimBottom, interPageGap: interPageGap)
+        let canvasWidth = canvas.width
+        let canvasHeight = canvas.height
 
         // Temporarily remove annotations to avoid drawing their appearances twice
         var removedPerPage: [[PDFAnnotation]] = Array(repeating: [], count: pageCount)
@@ -606,13 +605,9 @@ struct ContentView: View {
             let seamTop: CGFloat = (i == 0) ? 0 : trimTop
             let seamBottom: CGFloat = (i == pageCount - 1) ? 0 : trimBottom
 
-            // Visible rect in PAGE space (bottom-left origin)
-            let sourceMinX = rect.minX + per.left
-            let sourceMaxX = rect.maxX - per.right
-            let sourceMinY = rect.minY + per.bottom + seamBottom
-            let sourceMaxY = rect.maxY - per.top - seamTop
-            let visibleWidth  = max(0, sourceMaxX - sourceMinX)
-            let visibleHeight = max(0, sourceMaxY - sourceMinY)
+            let vis = PDFGeometry.visibleRect(media: rect, trims: per, seamTop: seamTop, seamBottom: seamBottom)
+            let visibleWidth = vis.width
+            let visibleHeight = vis.height
             guard visibleWidth > 0, visibleHeight > 0 else {
                 currentTop -= (max(0, visibleHeight) + interPageGap)
                 continue
@@ -624,11 +619,11 @@ struct ContentView: View {
             placedOriginsY[i] = destY
 
             ctx.saveGState()
-            // Translate so that (sourceMinX, sourceMinY) in page space lands at (destX, destY) in canvas space
-            ctx.translateBy(x: destX - sourceMinX, y: destY - sourceMinY)
+            // Translate so that (vis.minX, vis.minY) in page space lands at (destX, destY) in canvas space
+            ctx.translateBy(x: destX - vis.minX, y: destY - vis.minY)
             // Clip in the CURRENT (translated) coordinate system using a rect defined in PAGE space coordinates
-            // Because we translated by (-sourceMinX, -sourceMinY), the clip rect is simply:
-            ctx.clip(to: CGRect(x: sourceMinX, y: sourceMinY, width: visibleWidth, height: visibleHeight))
+            // Because we translated by (-vis.minX, -vis.minY), the clip rect is simply:
+            ctx.clip(to: vis)
 
             if let cgPage = page.pageRef {
                 ctx.drawPDFPage(cgPage)
@@ -668,12 +663,9 @@ struct ContentView: View {
             let seamTop: CGFloat = (i == 0) ? 0 : trimTop
             let seamBottom: CGFloat = (i == pageCount - 1) ? 0 : trimBottom
 
-            let sourceMinX = rect.minX + per.left
-            let sourceMinY = rect.minY + per.bottom + seamBottom
-            let destX: CGFloat = 0
-            let destY: CGFloat = placedOriginsY[i]
-            let dx = destX - sourceMinX
-            let dy = destY - sourceMinY
+            let vis = PDFGeometry.visibleRect(media: rect, trims: per, seamTop: seamTop, seamBottom: seamBottom)
+            let dx = 0 - vis.minX
+            let dy = placedOriginsY[i] - vis.minY
 
             for annot in srcPage.annotations {
                 guard annot.fieldName != nil else { continue }
@@ -717,8 +709,8 @@ struct ContentView: View {
                         if resourceValues.isDirectory == true {
                             continue
                         } else {
+                            if DEBUG_LOGS { print("Discovered file in folder: \(item.path)") }
                             collected.append(item)
-                            print("Discovered file in folder: \(item.path)")
                         }
                     } catch {
                         continue
@@ -731,12 +723,12 @@ struct ContentView: View {
         func extractFormFields(from url: URL) -> PDFEntry? {
             let needsStop = url.startAccessingSecurityScopedResource()
             defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
-            print("\n--- Parsing PDF: \(url.lastPathComponent) ---")
+            if DEBUG_LOGS { print("\n--- Parsing PDF: \(url.lastPathComponent) ---") }
             guard let doc = PDFDocument(url: url) else {
-                print("Failed to open PDF: \(url.path)")
+                if DEBUG_LOGS { print("Failed to open PDF: \(url.path)") }
                 return nil
             }
-            print("Opened PDF. Page count: \(doc.pageCount)")
+            if DEBUG_LOGS { print("Opened PDF. Page count: \(doc.pageCount)") }
 
             var pcardHolderName: String?
             var documentNumber: String?
@@ -755,13 +747,13 @@ struct ContentView: View {
 
             for pageIndex in 0..<doc.pageCount {
                 guard let page = doc.page(at: pageIndex) else { continue }
-                print("Page #\(pageIndex + 1): annotations=\(page.annotations.count)")
+                if DEBUG_LOGS { print("Page #\(pageIndex + 1): annotations=\(page.annotations.count)") }
                 for annot in page.annotations {
                     let key = annot.fieldName ?? ""
                     if key.isEmpty { continue }
                     let widgetType = String(describing: annot.widgetFieldType)
                     let extracted = value(from: annot) ?? "(nil)"
-                    print("  Annotation field=\(key) type=\(widgetType) value=\(extracted)")
+                    if DEBUG_LOGS { print("  Annotation field=\(key) type=\(widgetType) value=\(extracted)") }
 
                     if let v = value(from: annot), !(v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                         switch key {
@@ -788,7 +780,9 @@ struct ContentView: View {
                 }
             }
 
-            print("Captured -> Holder=\(pcardHolderName ?? "nil"), Doc#=\(documentNumber ?? "nil"), Date=\(date ?? "nil"), Amount=\(amount ?? "nil"), Vendor=\(vendor ?? "nil"), GL=\(glAccount ?? "nil"), CostObject=\(costObject ?? "nil"), Desc=\(description ?? "nil"))")
+            if DEBUG_LOGS {
+                print("Captured -> Holder=\(pcardHolderName ?? "nil"), Doc#=\(documentNumber ?? "nil"), Date=\(date ?? "nil"), Amount=\(amount ?? "nil"), Vendor=\(vendor ?? "nil"), GL=\(glAccount ?? "nil"), CostObject=\(costObject ?? "nil"), Desc=\(description ?? "nil"))")
+            }
 
             return PDFEntry(
                 url: url,
@@ -820,12 +814,7 @@ struct ContentView: View {
             }
         }
 
-        expanded = expanded.filter { url in
-            if let type = UTType(filenameExtension: url.pathExtension) {
-                return type.conforms(to: .pdf)
-            }
-            return url.pathExtension.lowercased() == "pdf"
-        }
+        expanded = expanded.filter { isPDF($0) }
 
         let uniqueURLs = expanded.filter { seen.insert($0).inserted }
         let entries: [PDFEntry] = uniqueURLs.compactMap { extractFormFields(from: $0) ?? PDFEntry(url: $0, pcardHolderName: nil, documentNumber: nil, date: nil, amount: nil, vendor: nil, glAccount: nil, costObject: nil, description: nil) }

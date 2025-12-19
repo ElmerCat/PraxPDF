@@ -1,6 +1,6 @@
 //
 //  WindowFrameAutosave.swift
-//  PraxPDF - Prax=1219-6
+//  PraxPDF - Prax=1219-7
 
 import SwiftUI
 import AppKit
@@ -26,3 +26,37 @@ struct WindowFrameAutosave: NSViewRepresentable {
     }
 }
 
+struct ApplyAutosavedFrame: NSViewRepresentable {
+    let name: String
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            // Ensure window is resizable so AppKit can apply the saved size
+            window.styleMask.insert(.resizable)
+            // Apply the autosaved frame if present
+            window.setFrameUsingName(name, force: true)
+        }
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+struct WindowAutosaveAndRestore: NSViewRepresentable {
+    let name: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            window.styleMask.insert(.resizable)
+            window.setFrameAutosaveName(name)
+            window.setFrameUsingName(name, force: true)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}

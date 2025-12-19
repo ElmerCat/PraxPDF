@@ -1,48 +1,29 @@
 //
-//  PreviewWindowView
-//  PraxPDF - Prax=1219-6
-
+//  PreviewWindowView.swift
+//  PraxPDF - Prax=1219-7
+//
 
 import SwiftUI
 import PDFKit
+import AppKit
 import Combine
 
-struct PreviewWindowView: View {
-    @ObservedObject private var previewModel: PDFPreviewModel
-
-    init(previewModel: PDFPreviewModel? = nil) {
-        // If no model is injected, create a private one so we don't crash.
-        self._previewModel = ObservedObject(wrappedValue: previewModel ?? PDFPreviewModel())
-    }
+// Minimal SwiftUI wrapper around PDFView
+struct PDFViewContainer: View {
+    @ObservedObject var previewModel: PDFPreviewModel
 
     var body: some View {
         Group {
             if let url = previewModel.fileURL {
-                VStack {
-                    Text(url.lastPathComponent)
-                        .font(.headline)
-                        .padding()
-                    PDFViewRepresentable(url: url)
-                        .edgesIgnoringSafeArea(.all)
-                }
+                PDFViewRepresentable(url: url)
             } else {
-                ContentUnavailableView {
-                    Text("No PDF available")
-                }
+                ContentUnavailableView { Text("No PDF available") }
             }
-        }
-        .onAppear {
-            previewModel.isVisible = true
-        }
-        .onDisappear {
-            previewModel.isVisible = false
         }
     }
 }
 
-
-import AppKit
-
+// Keep existing representable
 struct PDFViewRepresentable: NSViewRepresentable {
     let url: URL
 
@@ -56,38 +37,73 @@ struct PDFViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: PDFView, context: Context) {
-        // Ensure security-scoped access while loading the document
         let needsAccess = url.startAccessingSecurityScopedResource()
         defer { if needsAccess { url.stopAccessingSecurityScopedResource() } }
-
-        // Reload if document is nil or the URL changed
         let needsReload = (nsView.document == nil) || (nsView.document?.documentURL != url)
         if needsReload {
             if let doc = PDFDocument(url: url) {
                 nsView.document = doc
-                // Apply layout/scaling after setting document
                 nsView.layoutDocumentView()
                 nsView.autoScales = true
-                print("PDF loaded for \(url.lastPathComponent), pages=\(doc.pageCount)")
             } else {
                 nsView.document = nil
-                print("Failed to load PDF at: \(url.path)")
             }
         } else {
-            // Force layout on same-document updates
             nsView.layoutDocumentView()
         }
     }
 }
-
 
 final class PDFPreviewModel: ObservableObject {
     @Published var fileURL: URL?
     @Published var isVisible: Bool = false
 }
 
-#Preview("Preview Window") {
-    let model = PDFPreviewModel()
-    return PreviewWindowView(previewModel: model)
+// Presenter that mirrors PageTrimWindowPresenter
+final class PreviewWindowPresenter: NSObject, NSWindowDelegate {
+    static let shared = PreviewWindowPresenter()
+    private var window: NSWindow?
+    private let frameKey = "PreviewWindowFrame"
+
+    func present(model: PDFPreviewModel) {
+        if let win = window, let hosting = win.contentViewController as? NSHostingController<PDFViewContainer> {
+            hosting.rootView = PDFViewContainer(previewModel: model)
+            win.makeKeyAndOrderFront(nil)
+            model.isVisible = true
+            return
+        }
+        let hosting = NSHostingController(rootView: PDFViewContainer(previewModel: model))
+        let win = NSWindow(contentViewController: hosting)
+        win.title = "Preview"
+        if let saved = UserDefaults.standard.string(forKey: frameKey) {
+            win.setFrame(NSRectFromString(saved), display: true)
+        } else {
+            win.setContentSize(NSSize(width: 800, height: 1000))
+            win.center()
+        }
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.makeKeyAndOrderFront(nil)
+        window = win
+        model.isVisible = true
+    }
+
+    func close() {
+        window?.close()
+    }
+
+    func windowDidMove(_ notification: Notification) { saveFrame(notification) }
+    func windowDidEndLiveResize(_ notification: Notification) { saveFrame(notification) }
+    func windowWillClose(_ notification: Notification) {
+        if let hosting = window?.contentViewController as? NSHostingController<PDFViewContainer> {
+            hosting.rootView.previewModel.isVisible = false
+        }
+        window = nil
+    }
+
+    private func saveFrame(_ notification: Notification) {
+        guard let win = notification.object as? NSWindow else { return }
+        UserDefaults.standard.set(NSStringFromRect(win.frame), forKey: frameKey)
+    }
 }
 
