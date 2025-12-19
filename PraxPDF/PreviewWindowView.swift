@@ -1,6 +1,6 @@
 //
 //  PreviewWindowView
-//  PraxPDF - Prax=1217-0
+//  PraxPDF - Prax=1219-6
 
 
 import SwiftUI
@@ -90,3 +90,4 @@ final class PDFPreviewModel: ObservableObject {
     let model = PDFPreviewModel()
     return PreviewWindowView(previewModel: model)
 }
+

@@ -1,7 +1,6 @@
-
 //
 //  PraxPDFApp.swift
-//  PraxPDF - Prax=1217-0
+//  PraxPDF - Prax=1219-6
 //
 //  Created by Elmer Cat on 12/15/25.
 //
@@ -61,3 +60,4 @@ struct ApplyAutosavedFrame: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
+

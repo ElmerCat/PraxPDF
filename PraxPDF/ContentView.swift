@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  PraxPDF - Prax=1217-0
+//  PraxPDF - Prax=1219-6
 //
 //  Created by Elmer Cat on 12/15/25.
 //
@@ -64,6 +64,16 @@ struct ContentView: View {
     @State private var pageCount: Int? = nil
     @State private var totalHeightPoints: CGFloat? = nil
     @State private var maxWidthPoints: CGFloat? = nil
+    
+    @State private var unknownFieldNames: [String] = []
+    @State private var showUnknownFieldsAlert: Bool = false
+    
+    @AppStorage("mergeTopMargin") private var mergeTopMargin: Double = 0
+    @AppStorage("mergeBottomMargin") private var mergeBottomMargin: Double = 0
+    @AppStorage("mergeInterPageGap") private var mergeInterPageGap: Double = 0
+
+    @State private var isPreviewingMerge: Bool = false
+    @StateObject private var perPageTrimModel = PerPageTrimModel()
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -155,10 +165,13 @@ struct ContentView: View {
                 editGLAccount = ""
                 editCostObject = ""
                 editDescription = ""
-
+                
                 pageCount = nil
                 totalHeightPoints = nil
                 maxWidthPoints = nil
+                
+                unknownFieldNames = []
+                showUnknownFieldsAlert = false
 
                 pdfPreviewModel.fileURL = nil
                 dismissWindow(id: "preview")
@@ -193,11 +206,83 @@ struct ContentView: View {
                                     Text("PDF Metrics").font(.headline)
                                     Text("Pages: \(pc)")
                                     Text(String(format: "Merged size: %.0f × %.0f pts (%.2f × %.2f in)", maxW, totalH, inchesW, inchesH))
+                                    if !unknownFieldNames.isEmpty {
+                                        Text("Other fields: \(unknownFieldNames.count)")
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             } else {
                                 Text("PDF Metrics: —")
                                     .foregroundStyle(.secondary)
                             }
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Merge Layout").font(.headline)
+                            VStack(alignment: .leading, spacing: 12) {
+                                LabeledContent("Top trim") {
+                                    HStack(spacing: 8) {
+                                        TextField("pts", value: $mergeTopMargin, format: .number)
+                                            .frame(width: 70)
+                                            .textFieldStyle(.roundedBorder)
+                                        Stepper(value: $mergeTopMargin, in: 0...1000, step: 1) { EmptyView() }
+                                            .labelsHidden()
+                                        Slider(value: $mergeTopMargin, in: 0...1000, step: 1)
+                                            .frame(width: 160)
+                                        Text("\(Int(mergeTopMargin)) pt")
+                                        Text(inches(fromPoints: CGFloat(mergeTopMargin))).foregroundStyle(.secondary)
+                                    }
+                                }
+                                LabeledContent("Bottom trim") {
+                                    HStack(spacing: 8) {
+                                        TextField("pts", value: $mergeBottomMargin, format: .number)
+                                            .frame(width: 70)
+                                            .textFieldStyle(.roundedBorder)
+                                        Stepper(value: $mergeBottomMargin, in: 0...1000, step: 1) { EmptyView() }
+                                            .labelsHidden()
+                                        Slider(value: $mergeBottomMargin, in: 0...1000, step: 1)
+                                            .frame(width: 160)
+                                        Text("\(Int(mergeBottomMargin)) pt")
+                                        Text(inches(fromPoints: CGFloat(mergeBottomMargin))).foregroundStyle(.secondary)
+                                    }
+                                }
+                                LabeledContent("Gap between pages") {
+                                    HStack(spacing: 8) {
+                                        TextField("pts", value: $mergeInterPageGap, format: .number)
+                                            .frame(width: 70)
+                                            .textFieldStyle(.roundedBorder)
+                                        Stepper(value: $mergeInterPageGap, in: -200...1000, step: 1) { EmptyView() }
+                                            .labelsHidden()
+                                        Slider(value: $mergeInterPageGap, in: -200...1000, step: 1)
+                                            .frame(width: 160)
+                                        Text("\(Int(mergeInterPageGap)) pt")
+                                        Text(inches(fromPoints: CGFloat(mergeInterPageGap))).foregroundStyle(.secondary)
+                                    }
+                                }
+                                Menu("Presets") {
+                                    Button("No trims (0)") { applyPreset(points: 0) }
+                                    Button("0.25 in (18)") { applyPreset(points: 18) }
+                                    Button("0.5 in (36)") { applyPreset(points: 36) }
+                                    Button("1.0 in (72)") { applyPreset(points: 72) }
+                                }
+                            }
+                            HStack(spacing: 12) {
+                                Button(isPreviewingMerge ? "Update Preview" : "Preview Merge") {
+                                    previewMergedPDF()
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button("Open Page Trim Tool") {
+                                    if let id = selection, let entry = selectedFiles.first(where: { $0.id == id }) {
+                                        // Present a new window with the page crop tool
+                                        PageTrimWindowPresenter.present(url: entry.url, model: perPageTrimModel)
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .onChange(of: mergeTopMargin) { _, _ in updatePreviewIfNeeded() }
+                            .onChange(of: mergeBottomMargin) { _, _ in updatePreviewIfNeeded() }
+                            .onChange(of: mergeInterPageGap) { _, _ in updatePreviewIfNeeded() }
                         }
 
                         HStack {
@@ -255,7 +340,14 @@ struct ContentView: View {
             if let id = selection, let entry = selectedFiles.first(where: { $0.id == id }) {
                 SaveAsPanel(suggestedURL: entry.url.deletingPathExtension().appendingPathExtension("merged.pdf")) { destination in
                     do {
-                        try mergeAllPagesVerticallyIntoSinglePage(sourceURL: entry.url, destinationURL: destination)
+                        try mergeAllPagesVerticallyIntoSinglePage(
+                            sourceURL: entry.url,
+                            destinationURL: destination,
+                            trimTop: CGFloat(mergeTopMargin),
+                            trimBottom: CGFloat(mergeBottomMargin),
+                            interPageGap: CGFloat(mergeInterPageGap),
+                            perPageTrims: perPageTrimModel.trims
+                        )
                         // Update preview to show merged result if overwriting selected file
                     } catch {
                         saveError = error.localizedDescription
@@ -282,6 +374,36 @@ struct ContentView: View {
             Button("OK", role: .cancel) { importError = nil }
         } message: {
             Text(importError ?? "Unknown error")
+        }
+        .alert("Other Form Fields Detected", isPresented: $showUnknownFieldsAlert) {
+            Button("OK", role: .cancel) { showUnknownFieldsAlert = false }
+        } message: {
+            if unknownFieldNames.isEmpty {
+                Text("No additional form fields detected.")
+            } else {
+                Text(unknownFieldNames.joined(separator: ", "))
+            }
+        }
+    }
+    
+    private func updatePreviewIfNeeded() {
+        // Only auto-update when we are already previewing a merge
+        guard isPreviewingMerge, let id = selection, let entry = selectedFiles.first(where: { $0.id == id }) else { return }
+        do {
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("preview-merged-\(UUID().uuidString)").appendingPathExtension("pdf")
+            try mergeAllPagesVerticallyIntoSinglePage(
+                sourceURL: entry.url,
+                destinationURL: tmp,
+                trimTop: CGFloat(mergeTopMargin),
+                trimBottom: CGFloat(mergeBottomMargin),
+                interPageGap: CGFloat(mergeInterPageGap),
+                perPageTrims: perPageTrimModel.trims
+            )
+            pdfPreviewModel.fileURL = tmp
+            if !pdfPreviewModel.isVisible { openWindow(id: "preview") }
+        } catch {
+            saveError = error.localizedDescription
         }
     }
 
@@ -327,21 +449,52 @@ struct ContentView: View {
         let count = doc.pageCount
         var totalH: CGFloat = 0
         var maxW: CGFloat = 0
+        let knownFields: Set<String> = [
+            "PcardHolderName", "DocumentNumber", "Date", "Amount",
+            "Vendor", "GLAccount", "CostObject", "Description"
+        ]
+        var foundUnknowns = Set<String>()
         for i in 0..<count {
             guard let page = doc.page(at: i) else { continue }
             let rect = page.bounds(for: .mediaBox)
             totalH += rect.height
             if rect.width > maxW { maxW = rect.width }
+            for annot in page.annotations {
+                if let name = annot.fieldName, !name.isEmpty, !knownFields.contains(name) {
+                    foundUnknowns.insert(name)
+                }
+            }
         }
         pageCount = count
         totalHeightPoints = totalH
         maxWidthPoints = maxW
+        let sortedUnknowns = Array(foundUnknowns).sorted()
+        unknownFieldNames = sortedUnknowns
+        showUnknownFieldsAlert = !sortedUnknowns.isEmpty
+    }
+    
+    private func inches(fromPoints pts: CGFloat) -> String {
+        let inches = pts / 72.0
+        return String(format: "%.2f in", inches)
+    }
+    
+    private func applyPreset(points: CGFloat) {
+        mergeTopMargin = Double(points)
+        mergeBottomMargin = Double(points)
+        // Inter-page gap often matches trims; keep as-is to allow zero-gap when desired
     }
 
     private func handleMergePagesOverwrite() {
         guard let id = selection, let entry = selectedFiles.first(where: { $0.id == id }) else { return }
         do {
-            try mergeAllPagesVerticallyIntoSinglePage(sourceURL: entry.url, destinationURL: entry.url)
+            try mergeAllPagesVerticallyIntoSinglePage(
+                sourceURL: entry.url,
+                destinationURL: entry.url,
+                trimTop: CGFloat(mergeTopMargin),
+                trimBottom: CGFloat(mergeBottomMargin),
+                interPageGap: CGFloat(mergeInterPageGap),
+                perPageTrims: perPageTrimModel.trims
+            )
             // Refresh preview if it's currently visible
             if pdfPreviewModel.isVisible {
                 let current = pdfPreviewModel.fileURL
@@ -355,16 +508,38 @@ struct ContentView: View {
         }
     }
 
-    private func mergeAllPagesVerticallyIntoSinglePage(sourceURL: URL, destinationURL: URL) throws {
+    private func previewMergedPDF() {
+        guard let id = selection, let entry = selectedFiles.first(where: { $0.id == id }) else { return }
+        do {
+            let fm = FileManager.default
+            let tmp = fm.temporaryDirectory.appendingPathComponent("preview-merged-\(UUID().uuidString)").appendingPathExtension("pdf")
+            try mergeAllPagesVerticallyIntoSinglePage(
+                sourceURL: entry.url,
+                destinationURL: tmp,
+                trimTop: CGFloat(mergeTopMargin),
+                trimBottom: CGFloat(mergeBottomMargin),
+                interPageGap: CGFloat(mergeInterPageGap),
+                perPageTrims: perPageTrimModel.trims
+            )
+            pdfPreviewModel.fileURL = tmp
+            isPreviewingMerge = true
+            if !pdfPreviewModel.isVisible {
+                openWindow(id: "preview")
+            }
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+
+    private func mergeAllPagesVerticallyIntoSinglePage(sourceURL: URL, destinationURL: URL, trimTop: CGFloat = 0, trimBottom: CGFloat = 0, interPageGap: CGFloat = 0, perPageTrims: [Int: EdgeTrims] = [:]) throws {
         let needsStopSource = sourceURL.startAccessingSecurityScopedResource()
         defer { if needsStopSource { sourceURL.stopAccessingSecurityScopedResource() } }
         guard let sourceDoc = PDFDocument(url: sourceURL) else {
             throw NSError(domain: "PraxPDF", code: 1001, userInfo: [NSLocalizedDescriptionKey: "Unable to open source PDF for merging."])
         }
 
-        let count = sourceDoc.pageCount
-        if count == 0 {
-            // Write empty doc
+        let pageCount = sourceDoc.pageCount
+        if pageCount == 0 {
             let empty = PDFDocument()
             if FileManager.default.fileExists(atPath: destinationURL.path) {
                 try? FileManager.default.removeItem(at: destinationURL)
@@ -373,24 +548,45 @@ struct ContentView: View {
             return
         }
 
-        // Calculate canvas size in points
-        var totalHeight: CGFloat = 0
-        var maxWidth: CGFloat = 0
+        // Use mediaBox consistently (matches the Trim Tool and thumbnails)
         var pageRects: [CGRect] = []
-        for i in 0..<count {
+        pageRects.reserveCapacity(pageCount)
+        var maxVisibleWidth: CGFloat = 0
+        var visibleHeights: [CGFloat] = Array(repeating: 0, count: pageCount)
+
+        for i in 0..<pageCount {
             guard let page = sourceDoc.page(at: i) else { continue }
             let rect = page.bounds(for: .mediaBox)
-            totalHeight += rect.height
-            maxWidth = max(maxWidth, rect.width)
             pageRects.append(rect)
+
+            let per = perPageTrims[i] ?? .zero
+            let seamTop: CGFloat = (i == 0) ? 0 : trimTop
+            let seamBottom: CGFloat = (i == pageCount - 1) ? 0 : trimBottom
+            let vw = max(0, rect.width  - (per.left + per.right))
+            let vh = max(0, rect.height - (per.top  + per.bottom) - (seamTop + seamBottom))
+            maxVisibleWidth = max(maxVisibleWidth, vw)
+            visibleHeights[i] = vh
         }
 
-        // Setup a PDF graphics context
-        var mediaBox = CGRect(x: 0, y: 0, width: maxWidth, height: totalHeight)
+        let internalSeams = max(0, pageCount - 1)
+        let gapsTotal = interPageGap * CGFloat(internalSeams)
+        let canvasWidth = maxVisibleWidth
+        let canvasHeight = visibleHeights.reduce(0, +) + gapsTotal
+
+        // Temporarily remove annotations to avoid drawing their appearances twice
+        var removedPerPage: [[PDFAnnotation]] = Array(repeating: [], count: pageCount)
+        for i in 0..<pageCount {
+            if let p = sourceDoc.page(at: i) {
+                removedPerPage[i] = p.annotations
+                for a in p.annotations { p.removeAnnotation(a) }
+            }
+        }
+
+        // Create a one-page PDF context
         let fm = FileManager.default
-        // Write to a temp URL first to be safe
-        let tmp = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
-        guard let consumer = CGDataConsumer(url: tmp as CFURL) else {
+        var mediaBox = CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
+        let tmpOut = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
+        guard let consumer = CGDataConsumer(url: tmpOut as CFURL) else {
             throw NSError(domain: "PraxPDF", code: 1002, userInfo: [NSLocalizedDescriptionKey: "Failed to create data consumer."])
         }
         guard let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
@@ -399,33 +595,104 @@ struct ContentView: View {
 
         ctx.beginPDFPage([kCGPDFContextMediaBox as String: mediaBox] as CFDictionary)
 
-        // Draw pages top-to-bottom
-        var currentTop = totalHeight
-        for i in 0..<count {
+        // Stack pages from top to bottom. Track the Y origin of each placed slice for annotation mapping.
+        var currentTop = canvasHeight
+        var placedOriginsY: [CGFloat] = Array(repeating: 0, count: pageCount)
+
+        for i in 0..<pageCount {
             guard let page = sourceDoc.page(at: i) else { continue }
             let rect = pageRects[i]
-            let pageHeight = rect.height
-            let drawOriginY = currentTop - pageHeight
+            let per = perPageTrims[i] ?? .zero
+            let seamTop: CGFloat = (i == 0) ? 0 : trimTop
+            let seamBottom: CGFloat = (i == pageCount - 1) ? 0 : trimBottom
+
+            // Visible rect in PAGE space (bottom-left origin)
+            let sourceMinX = rect.minX + per.left
+            let sourceMaxX = rect.maxX - per.right
+            let sourceMinY = rect.minY + per.bottom + seamBottom
+            let sourceMaxY = rect.maxY - per.top - seamTop
+            let visibleWidth  = max(0, sourceMaxX - sourceMinX)
+            let visibleHeight = max(0, sourceMaxY - sourceMinY)
+            guard visibleWidth > 0, visibleHeight > 0 else {
+                currentTop -= (max(0, visibleHeight) + interPageGap)
+                continue
+            }
+
+            // Place the slice at the LEFT edge (x = 0) and directly under the running top
+            let destX: CGFloat = 0
+            let destY: CGFloat = currentTop - visibleHeight
+            placedOriginsY[i] = destY
 
             ctx.saveGState()
-            ctx.translateBy(x: 0, y: drawOriginY)
-            // Draw at native scale
-            page.draw(with: .mediaBox, to: ctx)
+            // Translate so that (sourceMinX, sourceMinY) in page space lands at (destX, destY) in canvas space
+            ctx.translateBy(x: destX - sourceMinX, y: destY - sourceMinY)
+            // Clip in the CURRENT (translated) coordinate system using a rect defined in PAGE space coordinates
+            // Because we translated by (-sourceMinX, -sourceMinY), the clip rect is simply:
+            ctx.clip(to: CGRect(x: sourceMinX, y: sourceMinY, width: visibleWidth, height: visibleHeight))
+
+            if let cgPage = page.pageRef {
+                ctx.drawPDFPage(cgPage)
+            } else {
+                page.draw(with: .mediaBox, to: ctx)
+            }
             ctx.restoreGState()
 
-            currentTop -= pageHeight
+            currentTop -= (visibleHeight + interPageGap)
         }
 
         ctx.endPDFPage()
         ctx.closePDF()
 
+        // Restore annotations to source pages
+        for i in 0..<pageCount {
+            if let p = sourceDoc.page(at: i) {
+                for a in removedPerPage[i] { p.addAnnotation(a) }
+            }
+        }
+
         // Move temp to destination
         let needsStopDest = destinationURL.startAccessingSecurityScopedResource()
         defer { if needsStopDest { destinationURL.stopAccessingSecurityScopedResource() } }
-        if fm.fileExists(atPath: destinationURL.path) {
-            try? fm.removeItem(at: destinationURL)
+        if fm.fileExists(atPath: destinationURL.path) { try? fm.removeItem(at: destinationURL) }
+        try fm.moveItem(at: tmpOut, to: destinationURL)
+
+        // Second pass: reopen merged and re-add cloned annotations with the SAME translation used above
+        let needsStopDest2 = destinationURL.startAccessingSecurityScopedResource()
+        defer { if needsStopDest2 { destinationURL.stopAccessingSecurityScopedResource() } }
+        guard let mergedDoc = PDFDocument(url: destinationURL), let mergedPage = mergedDoc.page(at: 0) else { return }
+
+        for i in 0..<pageCount {
+            guard let srcPage = sourceDoc.page(at: i) else { continue }
+            let rect = pageRects[i]
+            let per = perPageTrims[i] ?? .zero
+            let seamTop: CGFloat = (i == 0) ? 0 : trimTop
+            let seamBottom: CGFloat = (i == pageCount - 1) ? 0 : trimBottom
+
+            let sourceMinX = rect.minX + per.left
+            let sourceMinY = rect.minY + per.bottom + seamBottom
+            let destX: CGFloat = 0
+            let destY: CGFloat = placedOriginsY[i]
+            let dx = destX - sourceMinX
+            let dy = destY - sourceMinY
+
+            for annot in srcPage.annotations {
+                guard annot.fieldName != nil else { continue }
+                guard let copied = annot.copy() as? PDFAnnotation else { continue }
+                copied.bounds = annot.bounds.offsetBy(dx: dx, dy: dy)
+                mergedPage.addAnnotation(copied)
+                if copied.widgetFieldType == .text {
+                    if let v = copied.widgetStringValue, !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        copied.widgetStringValue = v
+                    }
+                }
+            }
         }
-        try fm.moveItem(at: tmp, to: destinationURL)
+
+        // Save final merged doc safely
+        let tmpFinal = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
+        guard mergedDoc.write(to: tmpFinal) else { return }
+        if fm.fileExists(atPath: destinationURL.path) { try? fm.removeItem(at: destinationURL) }
+        try fm.moveItem(at: tmpFinal, to: destinationURL)
     }
 
     private func handleImportResult(_ result: Result<[URL], Error>) {
@@ -597,12 +864,10 @@ extension ContentView {
             for annot in page.annotations {
                 guard let key = annot.fieldName, !key.isEmpty else { continue }
                 if let newValue = updates.first(where: { $0.0 == key })?.1 {
-                    if !newValue.isEmpty {
-                        annot.widgetStringValue = newValue
-                        annot.contents = newValue
-                    } else {
-                        annot.widgetStringValue = nil
-                        annot.contents = nil
+                    let target = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let current = (annot.widgetStringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if current != target {
+                        annot.widgetStringValue = target
                     }
                 }
             }
@@ -640,6 +905,45 @@ struct SaveAsPanel: View {
     }
 }
 
+private final class PageTrimWindowPresenter: NSObject, NSWindowDelegate {
+    static let shared = PageTrimWindowPresenter()
+    private var window: NSWindow?
+    private let frameKey = "PageTrimWindowFrame"
+
+    static func present(url: URL, model: PerPageTrimModel) {
+        shared.present(url: url, model: model)
+    }
+
+    private func present(url: URL, model: PerPageTrimModel) {
+        if let win = window, let hosting = win.contentViewController as? NSHostingController<PageTrimView> {
+            hosting.rootView = PageTrimView(url: url, model: model)
+            win.makeKeyAndOrderFront(nil)
+            return
+        }
+        let hosting = NSHostingController(rootView: PageTrimView(url: url, model: model))
+        let win = NSWindow(contentViewController: hosting)
+        win.title = "Page Trim Tool"
+        if let saved = UserDefaults.standard.string(forKey: frameKey) {
+            win.setFrame(NSRectFromString(saved), display: true)
+        } else {
+            win.setContentSize(NSSize(width: 900, height: 700))
+            win.center()
+        }
+        win.delegate = self
+        win.isReleasedWhenClosed = false
+        win.makeKeyAndOrderFront(nil)
+        window = win
+    }
+
+    func windowDidMove(_ notification: Notification) { saveFrame(notification) }
+    func windowDidEndLiveResize(_ notification: Notification) { saveFrame(notification) }
+    func windowWillClose(_ notification: Notification) { window = nil }
+
+    private func saveFrame(_ notification: Notification) {
+        guard let win = notification.object as? NSWindow else { return }
+        UserDefaults.standard.set(NSStringFromRect(win.frame), forKey: frameKey)
+    }
+}
 
 #Preview("ContentView") {
     ContentView(pdfPreviewModel: PDFPreviewModel())

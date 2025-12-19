@@ -1,6 +1,6 @@
 //
 //  WindowFrameAutosave.swift
-//  PraxPDF - Prax=1217-0
+//  PraxPDF - Prax=1219-6
 
 import SwiftUI
 import AppKit
@@ -25,3 +25,4 @@ struct WindowFrameAutosave: NSViewRepresentable {
         // No-op
     }
 }
+
